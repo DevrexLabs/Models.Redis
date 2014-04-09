@@ -49,6 +49,14 @@ namespace OrigoDB.Models.Redis
             _structures.Clear();
         }
 
+        /// <summary>
+        /// Return the total number of keys, corresponds to DBSIZE
+        /// </summary>
+        /// <returns></returns>
+        public int KeyCount()
+        {
+            return _structures.Count;
+        }
 
         public bool Exists(string key)
         {
