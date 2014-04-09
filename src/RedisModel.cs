@@ -58,11 +58,20 @@ namespace OrigoDB.Models.Redis
             return _structures.Count;
         }
 
+        /// <summary>
+        /// Returns true if key exists
+        /// </summary>
         public bool Exists(string key)
         {
             return _structures.ContainsKey(key);
         }
 
+        /// <summary>
+        /// Returns the string representation of the type of the value stored at key. 
+        /// The different types that can be returned are: string, list, set, zset and hash.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <returns> type of key, or KeyType.None when key does not exist</returns>
         public KeyType Type(string key)
         {
             object value;
@@ -77,6 +86,15 @@ namespace OrigoDB.Models.Redis
             return KeyType.None;
         }
 
+
+        /// <summary>
+        /// If key already exists and is a string, this command appends the value at the end of the string.
+        /// If key does not exist it is created and set as an empty string,
+        /// so APPEND will be similar to SET in this special case.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="value"></param>
+        /// <returns>length of the string after the append operation</returns>
         [Command]
         public int Append(string key, string value)
         {
@@ -84,13 +102,24 @@ namespace OrigoDB.Models.Redis
             return sb.Append(value).Length;
         }
 
+        /// <summary>
+        /// Set key to hold the string value. If key already holds a value, it is overwritten,
+        /// regardless of its type. Any previous time to live associated 
+        /// with the key is discarded on successful SET operation.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="value"></param>
         public void Set(string key, string value)
         {
-            GetStringBuilder(key, create: true)
-                .Clear()
-                .Append(value);
+            _structures[key] = new StringBuilder(value);
         }
 
+        /// <summary>
+        /// Get the value of key. If the key does not exist the special value nil is returned. An error is returned
+        /// if the value stored at key is not a string, because GET only handles string values.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <returns></returns>
         public string Get(string key)
         {
             var builder = GetStringBuilder(key);
@@ -99,7 +128,17 @@ namespace OrigoDB.Models.Redis
         }
 
 
-
+        /// <summary>
+        /// Count the number of set bits (population counting) in a string. By default all the bytes contained
+        /// in the string are examined. It is possible to specify the counting operation only in an interval passing
+        /// the additional arguments start and end. Like for the GETRANGE command start and end can contain negative
+        /// values in order to index bytes starting from the end of the string, where -1 is the last byte, -2 is the
+        /// penultimate, and so forth. Non-existent keys are treated as empty strings, so the command will return zero
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="startByte"></param>
+        /// <param name="endByte"></param>
+        /// <returns>the number of bits set to 1</returns>
         public int BitCount(string key, int startByte = 0, int endByte = Int32.MaxValue)
         {
 
@@ -173,13 +212,22 @@ namespace OrigoDB.Models.Redis
             return DecrementBy(key, 1);
         }
 
-
+        /// <summary>
+        /// Increments the number stored at key by one. If the key does not exist, it is set to 0 before performing the operation.
+        /// An error is returned if the key contains a value of the wrong type or contains a string that can not be represented as integer.
+        /// This operation is limited to 64 bit signed integers.
+        /// </summary>
         [Command]
         public long Increment(string key)
         {
             return DecrementBy(key, -1);
         }
 
+        /// <summary>
+        /// Increments the number stored at key by a given value. If the key does not exist, it is set to 0 before performing the operation.
+        /// An error is returned if the key contains a value of the wrong type or contains a string that can not be represented as integer.
+        /// This operation is limited to 64 bit signed integers.
+        /// </summary>
         [Command]
         public long IncrementBy(string key, long delta)
         {
@@ -280,6 +328,10 @@ namespace OrigoDB.Models.Redis
             return sb.Length;
         }
 
+        /// <summary>
+        /// Return a random key from the key space or null if there are no keys.
+        /// </summary>
+        /// <returns></returns>
         public string RandomKey()
         {
             if (_structures.Count == 0) return null;
@@ -289,6 +341,14 @@ namespace OrigoDB.Models.Redis
         }
 
 
+        /// <summary>
+        /// Renames key to newkey. It returns an error when the source and destination names are the same,
+        /// or when key does not exist. If newkey already exists it is overwritten, when this happens RENAME executes an
+        /// implicit DEL operation, so if the deleted key contains a very big value it may cause high latency
+        /// even if RENAME itself is usually a constant-time operation.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="newkey"></param>
         public void Rename(string key, string newkey)
         {
             if (key == newkey) throw new CommandAbortedException("newkey cannot be same as key");
@@ -469,8 +529,6 @@ namespace OrigoDB.Models.Redis
         /// If key does not exist, it is created as empty list before
         /// performing the push operations. When key holds a value that is not a list, an error is returned.
         /// </summary>
-        /// <param name="key"></param>
-        /// <param name="value"></param>
         /// <returns>length of the list after the push operations</returns>
         [Command]
         public int LPush(string key, params string[] values)
@@ -491,6 +549,13 @@ namespace OrigoDB.Models.Redis
             return NPush(key, head: false, values: values);
         }
 
+        /// <summary>
+        /// Helper shared by RPush and LPush
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="head"></param>
+        /// <param name="values"></param>
+        /// <returns></returns>
         private int NPush(string key, bool head, params string[] values)
         {
             var list = GetList(key, create: true);
@@ -716,7 +781,7 @@ namespace OrigoDB.Models.Redis
         /// An error is returned if source or destination does not hold a set value.
         /// </summary>
         /// <param name="source"></param>
-        /// <param name="target"></param>
+        /// <param name="destination"></param>
         /// <param name="value"></param>
         /// <returns>true if the element was moved</returns>
         [Command]
@@ -748,20 +813,13 @@ namespace OrigoDB.Models.Redis
         }
 
         /// <summary>
-        /// When called with just the key argument, return
-        /// a random element from the set value stored at key.
-        /// Starting from Redis version 2.6, when called with
-        /// the additional count argument, return an array of
-        /// count distinct elements if count is positive.
-        /// If called with a negative count the behavior changes
-        /// and the command is allowed to return the same element
-        /// multiple times. In this case the numer of returned
-        /// elements is the absolute value of the specified count.
-        /// When called with just the key argument, the operation
-        /// is similar to SPOP, however while SPOP also removes the
-        /// randomly selected element from the set, SRANDMEMBER will
-        /// just return a random element without altering the original
-        /// set in any way.
+        /// When called with just the key argument, return a random element from the set value stored at key.
+        /// Starting from Redis version 2.6, when called with the additional count argument, return an array of
+        /// count distinct elements if count is positive. If called with a negative count the behavior changes
+        /// and the command is allowed to return the same element multiple times. In this case the numer of returned
+        /// elements is the absolute value of the specified count. When called with just the key argument, the operation
+        /// is similar to SPOP, however while SPOP also removes the randomly selected element from the set, SRANDMEMBER will
+        /// just return a random element without altering the original set in any way.
         /// </summary>
         /// <param name="key"></param>
         /// <param name="count"></param>
@@ -775,11 +833,6 @@ namespace OrigoDB.Models.Redis
             if (allowDuplicates) count = -count;
 
             if (!allowDuplicates && count >= set.Count) return set.ToArray();
-
-            Action<ICollection<int>> populator = c =>
-            {
-
-            };
 
             var result = new Dictionary<int, string>();
             var randomIndicies = allowDuplicates ? (ICollection<int>)new List<int>(count) : new HashSet<int>();
@@ -798,10 +851,8 @@ namespace OrigoDB.Models.Redis
         }
 
         /// <summary>
-        /// Remove the specified members from the set stored at key.
-        /// Specified members that are not a member of this set are
-        /// ignored. If key does not exist, it is treated as an empty
-        /// set and this command returns 0.
+        /// Remove the specified members from the set stored at key. Specified members that are not a member of this set are
+        /// ignored. If key does not exist, it is treated as an empty set and this command returns 0.
         /// An error is returned when the value stored at key is not a set.
         /// </summary>
         /// <param name="key"></param>
@@ -852,13 +903,12 @@ namespace OrigoDB.Models.Redis
         /// The score values should be the string representation of a numeric value, and accepts double precision floating point numbers.
         /// </summary>
         /// <param name="key"></param>
+        /// <param name="scoreAndMembersInterlaced"></param>
         /// <returns>The number of elements added to the sorted sets, not including elements already existing for which the score was updated.</returns>
         [Command]
         public int ZAdd(string key, params string[] scoreAndMembersInterlaced)
         {
             var sortedSet = GetSortedSet(key, create: true);
-
-
             try
             {
                 var pairs = ToPairs(scoreAndMembersInterlaced)
