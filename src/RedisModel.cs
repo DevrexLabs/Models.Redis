@@ -342,7 +342,6 @@ namespace OrigoDB.Models.Redis
         public string RandomKey()
         {
             if (_structures.Count == 0) return null;
-            //todo: optimize, should be O(1) not O(N)
             int randomIndex = _random.Next(_structures.Count);
             return _structures.Skip(randomIndex).Select(kvp => kvp.Key).First();
         }
@@ -907,11 +906,11 @@ namespace OrigoDB.Models.Redis
         [Command]
         public bool ZAdd(string key, string member, double score)
         {
-            return ZAdd(key, member, score.ToString()) == 1;
+            return ZAdd(key, new KeyValuePair<string, double>(member,score)) == 1;
         }
 
         [Command]
-        public int ZAdd(string key, KeyValuePair<string, double>[] items)
+        public int ZAdd(string key, params KeyValuePair<string, double>[] items)
         {
             var d = items.ToDictionary(item => item.Key, item => item.Value);
             return ZAdd(key, d);
@@ -923,7 +922,7 @@ namespace OrigoDB.Models.Redis
             var sortedSet = GetSortedSet(key, create: true);
 
             int elementsAdded = membersAndScores.Count;
-            foreach (var entry in membersAndScores.Select(ms => new ZSetEntry(ms.Value, ms.Key)))
+            foreach (var entry in membersAndScores.Select(ms => new ZSetEntry(ms.Key, ms.Value)))
             {
                 if (sortedSet.Remove(entry)) elementsAdded--;
                 sortedSet.Add(entry);
@@ -985,9 +984,9 @@ namespace OrigoDB.Models.Redis
         public double ZIncrementBy(string key, double increment, string member)
         {
             var sortedSet = GetSortedSet(key);
-            var entry = sortedSet.SingleOrDefault(e => e.Value == member);
+            var entry = sortedSet.SingleOrDefault(e => e.Member == member);
             if (entry != null) sortedSet.Remove(entry);
-            else entry = new ZSetEntry(0, member);
+            else entry = new ZSetEntry(member, 0);
             entry = entry.Increment(increment);
             sortedSet.Add(entry);
             return entry.Score;
@@ -1000,41 +999,14 @@ namespace OrigoDB.Models.Redis
         /// <param name="keys"></param>
         /// <param name="weights"></param>
         /// <param name="aggregateType"></param>
-        /// <returns></returns>
+        /// <returns>the number of elements in the set created</returns>
         [Command]
         public int ZInterStore(string destination, string[] keys, double[] weights = null, AggregateType aggregateType = AggregateType.Sum)
         {
             var sets = keys.Select(k => GetSortedSet(k) ?? new SortedSet<ZSetEntry>()).ToArray();
             if (sets.Any(s => s.Count == 0)) return 0;
-            return ZSetOperationAndStoreImpl(destination, sets, weights, aggregateType, false);
+            return ZSetOperationAndStoreImpl(destination, sets, weights, aggregateType, SetOperation.Intersection);
         }
-
-        private int ZSetOperationAndStoreImpl(string destination, SortedSet<ZSetEntry>[] sets, double[] weights,
-            AggregateType aggregateType, bool isUnionOperation)
-        {
-            if (weights != null && weights.Length != sets.Length)
-            {
-                throw new CommandAbortedException("number of weights must correspond to number of keys");
-            }
-
-            Func<int, double> weightOf = idx => weights == null ? 1.0 : weights[idx];
-            Func<double, double, double> aggregator = (a, b) =>
-                aggregateType == AggregateType.Sum
-                    ? a + b
-                    : aggregateType == AggregateType.Max ? Math.Max(a, b) : Math.Min(a, b);
-
-            var newSet = new SortedSet<ZSetEntry>(
-                sets
-                    .SelectMany((set, idx) => set.Select(e => new ZSetEntry(e.Score * weightOf(idx), e.Value)))
-                    .GroupBy(e => e.Value)
-                    .Where(g =>  isUnionOperation || g.Count() == sets.Length)
-                    .Select(g => new ZSetEntry(g.Select(e => e.Score).Aggregate(aggregator), g.Key))
-                );
-
-            if (newSet.Count > 0) _structures[destination] = newSet;
-            return newSet.Count;
-        }
-
 
         /// <summary>
         /// Returns the specified range of elements in the sorted set stored at key. 
@@ -1044,7 +1016,7 @@ namespace OrigoDB.Models.Redis
         /// <returns>the members of the set</returns>
         public string[] ZRange(string key, int start  = 0, int stop = -1)
         {
-            return ZRangeImpl(key, start, stop).Select(pair => pair.Key).ToArray();
+            return ZRangeImpl(key, start, stop).Select(entry => entry.Member).ToArray();
         }
 
         /// <summary>
@@ -1056,10 +1028,9 @@ namespace OrigoDB.Models.Redis
         /// <param name="start"></param>
         /// <param name="stop"></param>
         /// <returns></returns>
-        public KeyValuePair<string, double>[] ZRangeWithScores(string key, int start = 0, int stop = -1)
+        public SortedSet<ZSetEntry> ZRangeWithScores(string key, int start = 0, int stop = -1)
         {
-            return ZRangeImpl(key, start, stop).ToArray();
-
+            return new SortedSet<ZSetEntry>(ZRangeImpl(key, start, stop));
         }
 
         /// <summary>
@@ -1075,7 +1046,7 @@ namespace OrigoDB.Models.Redis
         /// <returns></returns>
         public string[] ZRangeByScore(string key, double min, double max, int skip = 0, int take = Int32.MaxValue)
         {
-            return ZRangeByScoreImpl(key, min, max, skip, take).Select(e => e.Value).ToArray();
+            return ZRangeByScoreImpl(key, min, max, skip, take).Select(e => e.Member).ToArray();
         }
 
         /// <summary>
@@ -1089,11 +1060,9 @@ namespace OrigoDB.Models.Redis
         /// <param name="skip"></param>
         /// <param name="take"></param>
         /// <returns></returns>
-        public KeyValuePair<string,double>[] ZRangeByScoreWithScores(string key, double min, double max, int skip = 0, int take = Int32.MaxValue)
+        public SortedSet<ZSetEntry> ZRangeByScoreWithScores(string key, double min, double max, int skip = 0, int take = Int32.MaxValue)
         {
-            return ZRangeByScoreImpl(key, min, max, skip, take)
-                .Select(e => new KeyValuePair<string, double>(e.Value, e.Score))
-                .ToArray();
+            return new SortedSet<ZSetEntry>(ZRangeByScoreImpl(key, min, max, skip, take));
         }
 
         /// <summary>
@@ -1112,7 +1081,7 @@ namespace OrigoDB.Models.Redis
             foreach (var entry in set)
             {
                 idx++;
-                if (entry.Value == member) return idx;
+                if (entry.Member == member) return idx;
             }
             return null;
         }
@@ -1129,7 +1098,7 @@ namespace OrigoDB.Models.Redis
         {
             var set = GetSortedSet(key);
             if (set == null) return 0;
-            return set.RemoveWhere(e => members.Contains(e.Value));
+            return set.RemoveWhere(e => members.Contains(e.Member));
         }
 
         /// <summary>
@@ -1144,7 +1113,7 @@ namespace OrigoDB.Models.Redis
         {
             var set = GetSortedSet(key);
             if (set == null) return 0;
-            return ZRange(key, first, last).Count(member => set.Remove(new ZSetEntry(0, member)));
+            return ZRemove(key, ZRange(key, first, last));
         }
 
         /// <summary>
@@ -1159,7 +1128,7 @@ namespace OrigoDB.Models.Redis
         {
             var set = GetSortedSet(key);
             if (set == null) return 0;
-            return ZRangeByScoreImpl(key, min, max, 0, int.MaxValue).Count(set.Remove);
+            return ZRangeByScoreImpl(key, min, max, 0, int.MaxValue).ToArray().Count(set.Remove);
         }
 
         /// <summary>
@@ -1173,7 +1142,7 @@ namespace OrigoDB.Models.Redis
             var set = GetSortedSet(key);
             if (set == null) return null;
             return set
-                .Where(e => e.Value == member)
+                .Where(e => e.Member == member)
                 .Select(e => (double?) e.Score)
                 .SingleOrDefault();
         }
@@ -1193,21 +1162,69 @@ namespace OrigoDB.Models.Redis
             return ZRange(key, range.FirstIdx, range.LastIdx).Reverse().ToArray();
         }
 
-        public KeyValuePair<string,double>[] ZReverseRangeWithScores(string key, int start = 0, int stop = 0)
+        /// <summary>
+        /// Same as ZRangeWithScores but in reverse order
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="start"></param>
+        /// <param name="stop"></param>
+        /// <returns></returns>
+        public SortedSet<ZSetEntry> ZReverseRangeWithScores(string key, int start = 0, int stop = 0)
         {
-            throw new NotImplementedException();
+            var set = GetSortedSet(key);
+            if(set == null) return new SortedSet<ZSetEntry>();
+            var range = new Range(start, stop, set.Count).Flip(set.Count);
+            return ZRangeWithScores(key, range.FirstIdx, range.LastIdx);
         }
 
-        public string[] ZReverseRangeByScoreWithScores(string key, double min = double.MinValue,
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="min"></param>
+        /// <param name="max"></param>
+        /// <param name="skip"></param>
+        /// <param name="take"></param>
+        /// <returns></returns>
+        public string[] ZReverseRangeByScore(string key, double min = double.MinValue, double max = double.MaxValue, int skip = 0, int take = int.MaxValue)
+        {
+            return ZRangeByScore(key, min, max)
+                .Reverse()
+                .Skip(skip)
+                .Take(take)
+                .ToArray();
+        }
+
+        /// <summary>
+        /// Same as ZRangeByScoreWithScores but in reverse order
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="min"></param>
+        /// <param name="max"></param>
+        /// <param name="skip"></param>
+        /// <param name="take"></param>
+        /// <returns></returns>
+        public SortedSet<ZSetEntry> ZReverseRangeByScoreWithScores(string key, double min = double.MinValue,
             double max = double.MaxValue, int skip = 0, int take = Int32.MaxValue)
         {
-            throw new NotImplementedException();
+            return new SortedSet<ZSetEntry>(ZRangeByScoreWithScores(key, min, max)
+                .Reverse()
+                .Skip(skip)
+                .Take(take));
         }
 
+        /// <summary>
+        /// Returns the rank of member in the sorted set stored at key,
+        /// with the scores ordered from high to low. The rank (or index) is 0-based,
+        /// which means that the member with the highest score has rank 0.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="member"></param>
+        /// <returns></returns>
         public int? ZReverseRank(string key, string member)
         {
             var rank = ZRank(key, member);
-            if (rank.HasValue) return GetSortedSet(key).Count - rank.Value;
+            if (rank.HasValue) return GetSortedSet(key).Count - rank.Value - 1;
             return null;
         }
 
@@ -1225,9 +1242,50 @@ namespace OrigoDB.Models.Redis
             AggregateType aggregateType = AggregateType.Sum)
         {
             var sets = keys.Select(k => GetSortedSet(k) ?? new SortedSet<ZSetEntry>()).ToArray();
-            return ZSetOperationAndStoreImpl(destination, sets, weights, aggregateType, isUnionOperation: true);
+            return ZSetOperationAndStoreImpl(destination, sets, weights, aggregateType, SetOperation.Union);
         }
 
+        private enum SetOperation
+        {
+            Union,
+            Intersection
+        };
+
+        /// <summary>
+        /// Create a new set as either a union or an intersection
+        /// of a given list of sets
+        /// </summary>
+        /// <param name="destination"></param>
+        /// <param name="sets"></param>
+        /// <param name="weights"></param>
+        /// <param name="aggregateType"></param>
+        /// <param name="setOperation"></param>
+        /// <returns></returns>
+        private int ZSetOperationAndStoreImpl(string destination, SortedSet<ZSetEntry>[] sets, double[] weights,
+                AggregateType aggregateType, SetOperation setOperation)
+        {
+            if (weights != null && weights.Length != sets.Length)
+            {
+                throw new CommandAbortedException("number of weights must correspond to number of keys");
+            }
+
+            Func<int, double> weightOf = idx => weights == null ? 1.0 : weights[idx];
+            Func<double, double, double> aggregator = (a, b) =>
+                aggregateType == AggregateType.Sum
+                    ? a + b
+                    : aggregateType == AggregateType.Max ? Math.Max(a, b) : Math.Min(a, b);
+
+            var newSet = new SortedSet<ZSetEntry>(
+                sets
+                    .SelectMany((set, idx) => set.Select(e => new ZSetEntry(e.Member, e.Score * weightOf(idx))))
+                    .GroupBy(e => e.Member)
+                    .Where(g => setOperation == SetOperation.Union || g.Count() == sets.Length)
+                    .Select(g => new ZSetEntry(g.Key, g.Select(e => e.Score).Aggregate(aggregator)))
+                );
+
+            if (newSet.Count > 0) _structures[destination] = newSet;
+            return newSet.Count;
+        }
 
         private IEnumerable<ZSetEntry> ZRangeByScoreImpl(string key, double min, double max, int skip, int take)
         {
@@ -1240,50 +1298,48 @@ namespace OrigoDB.Models.Redis
                     .Take(take);
         }
 
-        private IEnumerable<KeyValuePair<string, double>> ZRangeImpl(string key, int start, int stop)
+        private IEnumerable<ZSetEntry> ZRangeImpl(string key, int start, int stop)
         {
             var sortedSet = GetSortedSet(key);
-            if (sortedSet == null) return new KeyValuePair<string, double>[0];
+            if (sortedSet == null) return Enumerable.Empty<ZSetEntry>();
 
             var range = new Range(start, stop, sortedSet.Count);
             return
                 sortedSet.Skip(range.FirstIdx)
-                    .Take(range.Length)
-                    .Select(e => new KeyValuePair<string, double>(e.Value, e.Score));
+                    .Take(range.Length);
         }
 
         private SortedSet<ZSetEntry> GetSortedSet(string key, bool create = false)
         {
-            return As<SortedSet<ZSetEntry>>(key, create, @throw: false);
+            return As<SortedSet<ZSetEntry>>(key, create);
         }
 
-        private HashSet<string> GetSet(string key, bool create = false, bool @throw = false)
+        private HashSet<string> GetSet(string key, bool create = false)
         {
-            return As<HashSet<string>>(key, create, @throw);
+            return As<HashSet<string>>(key, create);
         }
 
-        private List<String> GetList(string key, bool create = false, bool @throw = false)
+        private List<String> GetList(string key, bool create = false)
         {
-            return As<List<String>>(key, create, @throw);
+            return As<List<String>>(key, create);
         }
 
-        private Dictionary<string, string> GetHash(string key, bool create = false, bool @throw = false)
+        private Dictionary<string, string> GetHash(string key, bool create = false)
         {
-            return As<Dictionary<string, string>>(key, create, @throw);
+            return As<Dictionary<string, string>>(key, create);
         }
 
-        private StringBuilder GetStringBuilder(string key, bool create = false, bool @throw = false)
+        private StringBuilder GetStringBuilder(string key, bool create = false)
         {
-            return As<StringBuilder>(key, create, @throw);
+            return As<StringBuilder>(key, create);
         }
 
-        private T As<T>(string key, bool create, bool @throw = false) where T : class, new()
+        private T As<T>(string key, bool create) where T : class, new()
         {
             var result = GetStructure<T>(key);
-            if (result == null)
+            if (result == null && create)
             {
-                if (create) _structures[key] = result = new T();
-                else if (@throw) throw new CommandAbortedException("Key missing");
+                _structures[key] = result = new T();
             }
             return result;
         }
@@ -1311,44 +1367,5 @@ namespace OrigoDB.Models.Redis
                 yield return Tuple.Create(interlaced[i], interlaced[i + 1]);
             }
         }
-
-        private class ZSetEntry : IComparable<ZSetEntry>
-        {
-            public readonly double Score;
-            public readonly string Value;
-
-            public ZSetEntry(double score, string value)
-            {
-                Score = score;
-                Value = value;
-            }
-
-            public int CompareTo(ZSetEntry other)
-            {
-                int result = Math.Sign(Score - other.Score);
-                if (result == 0) result = String.Compare(Value, other.Value, StringComparison.InvariantCulture);
-                return result;
-            }
-
-            public override bool Equals(object obj)
-            {
-                var other = obj as ZSetEntry;
-                if (ReferenceEquals(other, null)) return false;
-                return Value == other.Value;
-            }
-
-            public override int GetHashCode()
-            {
-                return Value.GetHashCode();
-            }
-
-            internal ZSetEntry Increment(double increment)
-            {
-                return new ZSetEntry(Score + increment, Value);
-            }
-        }
-
-
-
     }
 }

@@ -1,10 +1,6 @@
 ﻿using System;
-using System.Collections;
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
 using System.Linq;
-using System.Net.Mail;
-using System.Runtime.InteropServices;
 using NUnit.Framework;
 using OrigoDB.Models.Redis;
 
@@ -14,7 +10,7 @@ namespace Models.Redis.Tests
     public class SortedSetTests : RedisTestBase
     {
         [Test]
-        public void ZAdd()
+        public void ZAdd_using_string_params()
         {
             _target.ZAdd("key", "47", "dad", "12", "boy", "10", "girl");
             Assert.AreEqual(1, _target.KeyCount());
@@ -52,11 +48,26 @@ namespace Models.Redis.Tests
             Assert.AreEqual(4, newScore, 0.00000001);
             Assert.AreEqual(4, _target.ZCard("key"));
             var range = _target.ZRangeWithScores("key");
-            Assert.That(range.Select(p => p.Key), Contains.Item("dog"));
-            Assert.AreEqual(range.Single(p => p.Key == "dog").Value, 4.0, 0.000001);
+            Assert.That(range.Select(e=> e.Member), Contains.Item("dog"));
+            Assert.AreEqual(range.Single(p => p.Member == "dog").Score, 4.0, 0.000001);
         }
 
-        private static object[] zinterstoredata =
+        [Test]
+        public void ZReverseRankTest()
+        {
+            const string k = "key";
+            _target.ZAdd(k, "a", 2);
+            _target.ZAdd(k, "b", 3);
+            _target.ZAdd(k, "c", 5);
+            _target.ZAdd(k, "d", 1);
+            Assert.IsFalse(_target.ZReverseRank(k, "fish").HasValue);
+            Assert.AreEqual(0, _target.ZReverseRank(k, "c"));
+            Assert.AreEqual(3, _target.ZReverseRank(k, "d"));
+            Assert.AreEqual(1, _target.ZReverseRank(k, "b"));
+        }
+
+
+        private static object[] zsetstoredata =
         {
             new object[]
             {
@@ -72,10 +83,10 @@ namespace Models.Redis.Tests
                     {"b", 1}
                 },
                 2,
-                new []
+                new SortedSet<ZSetEntry>
                 {
-                    new KeyValuePair<string,double>("a", 3),
-                    new KeyValuePair<string,double>("b", 3),
+                    new ZSetEntry("a",3),
+                    new ZSetEntry("b", 3),
                 },
                 RedisModel.AggregateType.Sum
             },
@@ -93,10 +104,10 @@ namespace Models.Redis.Tests
                     {"b", 1}
                 },
                 2,
-                new []
+                new SortedSet<ZSetEntry>
                 {
-                    new KeyValuePair<string,double>("a", 2),
-                    new KeyValuePair<string,double>("b", 2),
+                    new ZSetEntry("a",2),
+                    new ZSetEntry("b",2)
                 },
                 RedisModel.AggregateType.Max
             },
@@ -114,18 +125,18 @@ namespace Models.Redis.Tests
                     {"b", 1}
                 },
                 2,
-                new []
+                new SortedSet<ZSetEntry>
                 {
-                    new KeyValuePair<string,double>("a", 1),
-                    new KeyValuePair<string,double>("b", 1),
+                    new ZSetEntry( "a",1),
+                    new ZSetEntry("b",1)
                 },
                 RedisModel.AggregateType.Min
             },
 
         };
 
-        [Test, TestCaseSource("zinterstoredata")]
-        public void ZInterStoreTests(Dictionary<string,double> set1, Dictionary<string,double> set2, int expectedCount, KeyValuePair<string, double>[] expectedSet, RedisModel.AggregateType aggregateType)
+        [Test, TestCaseSource("zsetstoredata")]
+        public void ZInterStoreTests(Dictionary<string,double> set1, Dictionary<string,double> set2, int expectedCount, SortedSet<ZSetEntry> expectedSet, RedisModel.AggregateType aggregateType)
         {
             _target.ZAdd("s1", set1);
             _target.ZAdd("s2", set2);
@@ -164,6 +175,15 @@ namespace Models.Redis.Tests
         }
 
         [Test]
+        public void ZReverseRangeByScore()
+        {
+            _target.ZAdd("s1", "4", "a", "2", "b", "3", "c", "3", "d", "7", "e");
+            var actual = _target.ZReverseRangeByScore("s1", min: 2, max: 5);
+            var expected = new[] { "a", "d", "c", "b" };
+            CollectionAssert.AreEqual(expected, actual);
+        }
+
+        [Test]
         public void ZRank_returns_correct_rank()
         {
             _target.ZAdd("s1", "4", "a", "2", "b", "3", "c", "3", "d", "7", "e");
@@ -194,6 +214,27 @@ namespace Models.Redis.Tests
         }
 
         [Test]
+        public void ZRemoveRangeByRank()
+        {
+            _target.ZAdd("s1", "4", "a", "2", "b", "3", "c", "3", "d", "7", "e");
+            int numRemoved = _target.ZRemoveRangeByRank("s1", 2, 4);
+            Assert.AreEqual(3, numRemoved);
+            string[] expected = new[] {"b", "c"};
+            CollectionAssert.AreEqual(expected, _target.ZRange("s1"));
+        }
+
+        [Test]
+        public void ZRemoveRangeByScore()
+        {
+            _target.ZAdd("s1", "4", "a", "2", "b", "3", "c", "3", "d", "7", "e");
+            int numRemoved = _target.ZRemoveRangeByScore("s1", 3, 5);
+            Assert.AreEqual(3, numRemoved);
+            string[] expected = new[] { "b", "e" };
+            CollectionAssert.AreEqual(expected, _target.ZRange("s1"));
+        }
+
+
+        [Test]
         public void ZScore_for_existing_member_is_retrieved()
         {
             _target.ZAdd("s1", "4", "a", "2", "b", "3", "c", "3", "d", "7", "e");
@@ -210,8 +251,8 @@ namespace Models.Redis.Tests
         }
 
 
-        [Test, TestCaseSource("zinterstoredata")]
-        public void ZUnionStoreTests(Dictionary<string, double> set1, Dictionary<string,double> set2, int expectedCount, KeyValuePair<string, double>[] expectedSet, RedisModel.AggregateType aggregateType)
+        [Test, TestCaseSource("zsetstoredata")]
+        public void ZUnionStoreTests(Dictionary<string, double> set1, Dictionary<string,double> set2, int expectedCount, SortedSet<ZSetEntry> expectedSet, RedisModel.AggregateType aggregateType)
         {
             _target.ZAdd("s1", set1);
             _target.ZAdd("s2", set2);
@@ -226,6 +267,26 @@ namespace Models.Redis.Tests
 
             Console.WriteLine("s2 members:");
             foreach (var pair in _target.ZRangeWithScores("s2")) Console.WriteLine(pair);
+        }
+
+        [Test]
+        public void ZReverseRank()
+        {
+            foreach (var c in Enumerable.Range(1, 100))
+            {
+                _target.ZAdd("s", c.ToString(), c);
+            }
+            var range = _target.ZReverseRange("s", 2, 5);
+            Assert.AreEqual(4, range.Length);
+            CollectionAssert.AreEqual(range, new[]{"98","97", "96","95"});
+        }
+
+        [Test]
+        public void ZScore_existing_is_returned()
+        {
+            _target.ZAdd("k", "a", 42);
+            Assert.IsFalse(_target.ZScore("k","b").HasValue);
+            Assert.AreEqual(42, _target.ZScore("k", "a"), 0.000001);
         }
     }
 }
