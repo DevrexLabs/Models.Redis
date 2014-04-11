@@ -1,18 +1,10 @@
 ﻿using NUnit.Framework;
-using OrigoDB.Models.Redis;
 
 namespace Models.Redis.Tests
 {
     [TestFixture]
-    public class RedisModelTests
+    public class KeyTests : RedisTestBase
     {
-        private RedisModel _target;
-        
-        [SetUp]
-        public void Setup()
-        {
-            _target = new RedisModel();
-        }
 
         [Test]
         public void No_keys_after_clear()
@@ -38,7 +30,5 @@ namespace Models.Redis.Tests
             _target.Delete("key");
             Assert.IsFalse(_target.Exists("key"));
         }
-
-
     }
 }

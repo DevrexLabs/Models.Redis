@@ -24,6 +24,13 @@ namespace OrigoDB.Models.Redis
             SortedSet
         }
 
+        public enum AggregateType
+        {
+            Sum,
+            Min,
+            Max
+        }
+
         private readonly Random _random = new Random();
 
         /// <summary>
@@ -897,6 +904,35 @@ namespace OrigoDB.Models.Redis
             return items.Length;
         }
 
+        [Command]
+        public bool ZAdd(string key, string member, double score)
+        {
+            return ZAdd(key, member, score.ToString()) == 1;
+        }
+
+        [Command]
+        public int ZAdd(string key, KeyValuePair<string, double>[] items)
+        {
+            var d = items.ToDictionary(item => item.Key, item => item.Value);
+            return ZAdd(key, d);
+        }
+
+        [Command]
+        public int ZAdd(string key, IDictionary<string, double> membersAndScores)
+        {
+            var sortedSet = GetSortedSet(key, create: true);
+
+            int elementsAdded = membersAndScores.Count;
+            foreach (var entry in membersAndScores.Select(ms => new ZSetEntry(ms.Value, ms.Key)))
+            {
+                if (sortedSet.Remove(entry)) elementsAdded--;
+                sortedSet.Add(entry);
+            }
+            if (sortedSet.Count == 0) _structures.Remove(key);
+            return elementsAdded;
+            
+        }
+
         /// <summary>
         /// Adds all the specified members with the specified scores to the sorted set stored at key. It is possible to specify
         /// multiple score/member pairs. If a specified member is already a member of the sorted set, the score is updated and the element reinserted at the right position to ensure the correct ordering. If key does not exist, a new sorted set with the specified members as sole members is created, like if the sorted set was empty. If the key exists but does not hold a sorted set, an error is returned.
@@ -908,25 +944,312 @@ namespace OrigoDB.Models.Redis
         [Command]
         public int ZAdd(string key, params string[] scoreAndMembersInterlaced)
         {
-            var sortedSet = GetSortedSet(key, create: true);
             try
             {
-                var pairs = ToPairs(scoreAndMembersInterlaced)
-                    .Select(t => Tuple.Create(double.Parse(t.Item1), t.Item2))
-                    .ToArray();
-
-                int elementsAdded = pairs.Length;
-                foreach (var entry in pairs.Select(pair => new ZSetEntry(pair.Item1, pair.Item2)))
-                {
-                    if (sortedSet.Remove(entry)) elementsAdded--;
-                    sortedSet.Add(entry);
-                }
-                return elementsAdded;
+                var d = ToPairs(scoreAndMembersInterlaced).ToDictionary(p => p.Item2, p => double.Parse(p.Item1));
+                return ZAdd(key, d);
             }
             catch (FormatException)
             {
                 throw new CommandAbortedException("value is not a valid float");
             }
+        }
+
+        /// <summary>
+        /// Get the number of members in a sorted set
+        /// </summary>
+        /// <param name="key"></param>
+        /// <returns>the cardinality (number of elements) of the sorted set, or 0 if key does not exist</returns>
+        public int ZCard(string key)
+        {
+            var sortedSet = GetSortedSet(key);
+            return sortedSet == null ? 0 : sortedSet.Count;
+        }
+
+        /// <summary>
+        /// Count the members in a sorted set with scores within a given range
+        /// </summary>
+        public int ZCount(string key, double min, double max)
+        {
+            var sortedSet = GetSortedSet(key);
+            if (sortedSet == null) return 0;
+            return sortedSet
+                .SkipWhile(entry => entry.Score < min)
+                .TakeWhile(entry => entry.Score <= max).Count();
+        }
+
+        /// <summary>
+        /// Increments the score of member in the sorted set stored at key by increment.
+        /// </summary>
+        [Command]
+        public double ZIncrementBy(string key, double increment, string member)
+        {
+            var sortedSet = GetSortedSet(key);
+            var entry = sortedSet.SingleOrDefault(e => e.Value == member);
+            if (entry != null) sortedSet.Remove(entry);
+            else entry = new ZSetEntry(0, member);
+            entry = entry.Increment(increment);
+            sortedSet.Add(entry);
+            return entry.Score;
+        }
+
+        /// <summary>
+        /// Computes the intersection of the sorted sets identified by keys, and stores the result in destination.
+        /// </summary>
+        /// <param name="destination"></param>
+        /// <param name="keys"></param>
+        /// <param name="weights"></param>
+        /// <param name="aggregateType"></param>
+        /// <returns></returns>
+        [Command]
+        public int ZInterStore(string destination, string[] keys, double[] weights = null, AggregateType aggregateType = AggregateType.Sum)
+        {
+            var sets = keys.Select(k => GetSortedSet(k) ?? new SortedSet<ZSetEntry>()).ToArray();
+            if (sets.Any(s => s.Count == 0)) return 0;
+            return ZSetOperationAndStoreImpl(destination, sets, weights, aggregateType, false);
+        }
+
+        private int ZSetOperationAndStoreImpl(string destination, SortedSet<ZSetEntry>[] sets, double[] weights,
+            AggregateType aggregateType, bool isUnionOperation)
+        {
+            if (weights != null && weights.Length != sets.Length)
+            {
+                throw new CommandAbortedException("number of weights must correspond to number of keys");
+            }
+
+            Func<int, double> weightOf = idx => weights == null ? 1.0 : weights[idx];
+            Func<double, double, double> aggregator = (a, b) =>
+                aggregateType == AggregateType.Sum
+                    ? a + b
+                    : aggregateType == AggregateType.Max ? Math.Max(a, b) : Math.Min(a, b);
+
+            var newSet = new SortedSet<ZSetEntry>(
+                sets
+                    .SelectMany((set, idx) => set.Select(e => new ZSetEntry(e.Score * weightOf(idx), e.Value)))
+                    .GroupBy(e => e.Value)
+                    .Where(g =>  isUnionOperation || g.Count() == sets.Length)
+                    .Select(g => new ZSetEntry(g.Select(e => e.Score).Aggregate(aggregator), g.Key))
+                );
+
+            if (newSet.Count > 0) _structures[destination] = newSet;
+            return newSet.Count;
+        }
+
+
+        /// <summary>
+        /// Returns the specified range of elements in the sorted set stored at key. 
+        /// The elements are considered to be ordered from the lowest to the highest score.
+        /// Lexicographical order is used for elements with equal score.
+        /// </summary>
+        /// <returns>the members of the set</returns>
+        public string[] ZRange(string key, int start  = 0, int stop = -1)
+        {
+            return ZRangeImpl(key, start, stop).Select(pair => pair.Key).ToArray();
+        }
+
+        /// <summary>
+        /// Returns the specified range of elements in the sorted set stored at key.
+        /// The elements are considered to be ordered from the lowest to the highest score.
+        /// Lexicographical order is used for elements with equal score.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="start"></param>
+        /// <param name="stop"></param>
+        /// <returns></returns>
+        public KeyValuePair<string, double>[] ZRangeWithScores(string key, int start = 0, int stop = -1)
+        {
+            return ZRangeImpl(key, start, stop).ToArray();
+
+        }
+
+        /// <summary>
+        /// Returns all the elements in the sorted set at key with a score between min
+        /// and max (including elements with score equal to min or max).
+        /// The elements are considered to be ordered from low to high scores.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="min"></param>
+        /// <param name="max"></param>
+        /// <param name="skip"></param>
+        /// <param name="take"></param>
+        /// <returns></returns>
+        public string[] ZRangeByScore(string key, double min, double max, int skip = 0, int take = Int32.MaxValue)
+        {
+            return ZRangeByScoreImpl(key, min, max, skip, take).Select(e => e.Value).ToArray();
+        }
+
+        /// <summary>
+        /// Returns all the elements and scores in the sorted set at key with a score between min
+        /// and max (including elements with score equal to min or max).
+        /// The elements are considered to be ordered from low to high scores.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="min"></param>
+        /// <param name="max"></param>
+        /// <param name="skip"></param>
+        /// <param name="take"></param>
+        /// <returns></returns>
+        public KeyValuePair<string,double>[] ZRangeByScoreWithScores(string key, double min, double max, int skip = 0, int take = Int32.MaxValue)
+        {
+            return ZRangeByScoreImpl(key, min, max, skip, take)
+                .Select(e => new KeyValuePair<string, double>(e.Value, e.Score))
+                .ToArray();
+        }
+
+        /// <summary>
+        /// Returns the rank of member in the sorted set stored at key, with the scores ordered from low to high.
+        /// The rank (or index) is 0-based, which means that the member with the lowest score has rank 0.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="member"></param>
+        /// <returns>the rank of member or null if the set or member does not exist</returns>
+        public int? ZRank(string key, string member)
+        {
+            SortedSet<ZSetEntry> set = GetSortedSet(key);
+            if (set == null) return null;
+            int idx = -1;
+            
+            foreach (var entry in set)
+            {
+                idx++;
+                if (entry.Value == member) return idx;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Removes the specified members from the sorted set stored at key. Non existing members are ignored.
+        /// An error is returned when key exists and does not hold a sorted set.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="members"></param>
+        /// <returns>The number of members removed from the sorted set, not including non existing members</returns>
+        [Command]
+        public int ZRemove(string key, params string[] members)
+        {
+            var set = GetSortedSet(key);
+            if (set == null) return 0;
+            return set.RemoveWhere(e => members.Contains(e.Value));
+        }
+
+        /// <summary>
+        /// Removes all elements in the sorted set stored at key within rank between start and stop.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="first"></param>
+        /// <param name="last"></param>
+        /// <returns>Number of elements removed</returns>
+        [Command]
+        public int ZRemoveRangeByRank(string key, int first, int last)
+        {
+            var set = GetSortedSet(key);
+            if (set == null) return 0;
+            return ZRange(key, first, last).Count(member => set.Remove(new ZSetEntry(0, member)));
+        }
+
+        /// <summary>
+        /// Removes all elements in the sorted set stored at key with a score between min and max (inclusive).
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="min"></param>
+        /// <param name="max"></param>
+        /// <returns>the number of elements removed</returns>
+        [Command]
+        public int ZRemoveRangeByScore(string key, double min, double max)
+        {
+            var set = GetSortedSet(key);
+            if (set == null) return 0;
+            return ZRangeByScoreImpl(key, min, max, 0, int.MaxValue).Count(set.Remove);
+        }
+
+        /// <summary>
+        /// Returns the score of member in the sorted set at key
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="member"></param>
+        /// <returns>the score or null when the set or member doesn't exist</returns>
+        public double? ZScore(string key, string member)
+        {
+            var set = GetSortedSet(key);
+            if (set == null) return null;
+            return set
+                .Where(e => e.Value == member)
+                .Select(e => (double?) e.Score)
+                .SingleOrDefault();
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="start"></param>
+        /// <param name="stop"></param>
+        /// <returns></returns>
+        public string[] ZReverseRange(string key, int start, int stop)
+        {
+            var set = GetSortedSet(key);
+            if (set == null) return new string[0];
+            var range = new Range(start, stop).Flip(set.Count);
+            return ZRange(key, range.FirstIdx, range.LastIdx).Reverse().ToArray();
+        }
+
+        public KeyValuePair<string,double>[] ZReverseRangeWithScores(string key, int start = 0, int stop = 0)
+        {
+            throw new NotImplementedException();
+        }
+
+        public string[] ZReverseRangeByScoreWithScores(string key, double min = double.MinValue,
+            double max = double.MaxValue, int skip = 0, int take = Int32.MaxValue)
+        {
+            throw new NotImplementedException();
+        }
+
+        public int? ZReverseRank(string key, string member)
+        {
+            var rank = ZRank(key, member);
+            if (rank.HasValue) return GetSortedSet(key).Count - rank.Value;
+            return null;
+        }
+
+        /// <summary>
+        /// Computes the union of numkeys sorted sets given by the specified keys,
+        /// and stores the result in destination. 
+        /// </summary>
+        /// <param name="destination"></param>
+        /// <param name="keys"></param>
+        /// <param name="weights"></param>
+        /// <param name="aggregateType"></param>
+        /// <returns></returns>
+        [Command]
+        public int ZUnionStore(string destination, string[] keys, double[] weights = null,
+            AggregateType aggregateType = AggregateType.Sum)
+        {
+            var sets = keys.Select(k => GetSortedSet(k) ?? new SortedSet<ZSetEntry>()).ToArray();
+            return ZSetOperationAndStoreImpl(destination, sets, weights, aggregateType, isUnionOperation: true);
+        }
+
+
+        private IEnumerable<ZSetEntry> ZRangeByScoreImpl(string key, double min, double max, int skip, int take)
+        {
+            var set = GetSortedSet(key);
+            if (set == null) return new ZSetEntry[0];
+            return
+                set.SkipWhile(e => e.Score < min)
+                    .TakeWhile(e => e.Score <= max)
+                    .Skip(skip)
+                    .Take(take);
+        }
+
+        private IEnumerable<KeyValuePair<string, double>> ZRangeImpl(string key, int start, int stop)
+        {
+            var sortedSet = GetSortedSet(key);
+            if (sortedSet == null) return new KeyValuePair<string, double>[0];
+
+            var range = new Range(start, stop, sortedSet.Count);
+            return
+                sortedSet.Skip(range.FirstIdx)
+                    .Take(range.Length)
+                    .Select(e => new KeyValuePair<string, double>(e.Value, e.Score));
         }
 
         private SortedSet<ZSetEntry> GetSortedSet(string key, bool create = false)
@@ -963,12 +1286,10 @@ namespace OrigoDB.Models.Redis
                 else if (@throw) throw new CommandAbortedException("Key missing");
             }
             return result;
-
         }
 
         private T GetStructure<T>(string key) where T : class
         {
-
             object val;
             if (_structures.TryGetValue(key, out val))
             {
@@ -985,7 +1306,7 @@ namespace OrigoDB.Models.Redis
                 throw new CommandAbortedException("Odd number of arguments to MSet/HMSet");
             }
 
-            for (int i = 0; i < interlaced.Length / 2; i += 2)
+            for (int i = 0; i < interlaced.Length; i += 2)
             {
                 yield return Tuple.Create(interlaced[i], interlaced[i + 1]);
             }
@@ -1004,7 +1325,9 @@ namespace OrigoDB.Models.Redis
 
             public int CompareTo(ZSetEntry other)
             {
-                return Math.Sign(Score - other.Score);
+                int result = Math.Sign(Score - other.Score);
+                if (result == 0) result = String.Compare(Value, other.Value, StringComparison.InvariantCulture);
+                return result;
             }
 
             public override bool Equals(object obj)
@@ -1018,6 +1341,14 @@ namespace OrigoDB.Models.Redis
             {
                 return Value.GetHashCode();
             }
+
+            internal ZSetEntry Increment(double increment)
+            {
+                return new ZSetEntry(Score + increment, Value);
+            }
         }
+
+
+
     }
 }
