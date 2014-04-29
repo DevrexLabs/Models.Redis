@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package>
+  <metadata>
+    <id>OrigoDB.Models.Redis</id>
+    <title>OrigoDB Redis Model</title>
+    <version>0.1.0</version>
+    <authors>Robert Friberg</authors>
+    <copyright>Devrex Labs</copyright>
+    <summary>
+		A C# implementation of Redis for OrigoDB. 
+	</summary>
+    <description>
+		A C# implementation of Redis for OrigoDB. 
+    </description>
+    <projectUrl>https://github.com/devrexlabs/models.redis</projectUrl>
+	<iconUrl>http://devrexlabs.com/Content/icons/favicon.ico</iconUrl>
+    <licenseUrl>https://github.com/DevrexLabs/models.redis/blob/master/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <releaseNotes>https://github.com/DevrexLabs/Models.Redis/releases</releaseNotes>
+    <tags>OrigoDB in-memory imdb nosql database</tags>
+	<dependencies>
+            <group targetFramework=".NETFramework4.0">
+                <dependency id="OrigoDB.Core" version="0.12" />
+            </group>
+        </dependencies>
+  </metadata>
+  <files>
+    <file src="build\OrigoDB.Models.Redis.dll" target="lib\net40" />
+    <file src="build\OrigoDB.Models.Redis.pdb" target="lib\net40" />
+    <file src="build\OrigoDB.Models.Redis.XML" target="lib\net40" />
+    <file src="src\**\*.cs" target="src" />
+  </files>
+</package>
