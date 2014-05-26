@@ -12,6 +12,7 @@ namespace OrigoDB.Models.Redis
     /// <summary>
     /// Redis clone for OrigoDB
     /// </summary>
+    [Serializable]
     public class RedisModel : Model
     {
         public enum KeyType

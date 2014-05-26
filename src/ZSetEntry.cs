@@ -2,6 +2,7 @@ using System;
 
 namespace OrigoDB.Models.Redis
 {
+    [Serializable]
     public class ZSetEntry : IComparable<ZSetEntry>
     {
         public readonly double Score;
