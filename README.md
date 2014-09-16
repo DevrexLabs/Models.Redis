@@ -7,16 +7,6 @@ gaurantees. The basic commands for keys, strings, lists, sets, hashes and sorted
 The implementation is a single class, RedisModel. Redis commands correspond to methods with
 roughly the same name, signatures and behavior.  See the docs http://redis.io/commands
 
-Commands for cursors, transactions, scripting, server/connection commands
-### Unimplemented commands
-* pub/sub
-* expiration
-* add more tests
-* cursors - n/a unless running remote
-* transactions
-* scripting
-* server/connection - n/a, uses the OrigoDB infrastructure
-
 
 ## Example
 
