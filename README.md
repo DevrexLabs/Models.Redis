@@ -1,6 +1,10 @@
+# Deprecated!
+
+The RedisModel is now included in OrigoDb.Core
+https://github.com/devrexlabs/origodb
+
 Models.Redis
 ============
-
 A redis clone for OrigoDB implemented in C#. Uses OrigoDB for persistence and transaction
 gaurantees. The basic commands for keys, strings, lists, sets, hashes and sorted sets are implemented.
 
